@@ -14,7 +14,9 @@ use crate::facet::value_encoding::f64_into_bytes;
 use crate::update::new::extract::DocidsExtractor;
 use crate::update::new::{DocumentChange, ItemsPool};
 use crate::update::{create_sorter, GrenadParameters, MergeDeladdCboRoaringBitmaps};
-use crate::{DocumentId, FieldId, GlobalFieldsIdsMap, Index, Result, MAX_FACET_VALUE_LENGTH};
+use crate::{
+    DocumentId, FieldId, FieldsIdsMap, GlobalFieldsIdsMap, Index, Result, MAX_FACET_VALUE_LENGTH,
+};
 pub struct FacetedDocidsExtractor;
 
 impl FacetedDocidsExtractor {
@@ -23,6 +25,7 @@ impl FacetedDocidsExtractor {
         index: &Index,
         buffer: &mut Vec<u8>,
         fields_ids_map: &mut GlobalFieldsIdsMap,
+        db_fields_ids_map: &FieldsIdsMap,
         attributes_to_extract: &[&str],
         cached_sorter: &mut CboCachedSorter<MergeDeladdCboRoaringBitmaps>,
         document_change: DocumentChange,
@@ -30,7 +33,7 @@ impl FacetedDocidsExtractor {
         match document_change {
             DocumentChange::Deletion(inner) => extract_document_facets(
                 attributes_to_extract,
-                inner.current(rtxn, index)?.unwrap(),
+                &inner.current(rtxn, index, db_fields_ids_map)?.unwrap(),
                 fields_ids_map,
                 &mut |fid, value| {
                     Self::facet_fn_with_options(
@@ -46,7 +49,7 @@ impl FacetedDocidsExtractor {
             DocumentChange::Update(inner) => {
                 extract_document_facets(
                     attributes_to_extract,
-                    inner.current(rtxn, index)?.unwrap(),
+                    &inner.current(rtxn, index, db_fields_ids_map)?.unwrap(),
                     fields_ids_map,
                     &mut |fid, value| {
                         Self::facet_fn_with_options(
@@ -62,7 +65,7 @@ impl FacetedDocidsExtractor {
 
                 extract_document_facets(
                     attributes_to_extract,
-                    inner.new(),
+                    &inner.new(rtxn, index, db_fields_ids_map)?,
                     fields_ids_map,
                     &mut |fid, value| {
                         Self::facet_fn_with_options(
@@ -78,7 +81,7 @@ impl FacetedDocidsExtractor {
             }
             DocumentChange::Insertion(inner) => extract_document_facets(
                 attributes_to_extract,
-                inner.new(),
+                &inner.new(),
                 fields_ids_map,
                 &mut |fid, value| {
                     Self::facet_fn_with_options(
@@ -191,11 +194,12 @@ fn truncate_str(s: &str) -> &str {
 
 impl DocidsExtractor for FacetedDocidsExtractor {
     #[tracing::instrument(level = "trace", skip_all, target = "indexing::extract::faceted")]
-    fn run_extraction(
+    fn run_extraction<'pl>(
         index: &Index,
         fields_ids_map: &GlobalFieldsIdsMap,
+        db_fields_ids_map: &FieldsIdsMap,
         indexer: GrenadParameters,
-        document_changes: impl IntoParallelIterator<Item = Result<DocumentChange>>,
+        document_changes: impl IntoParallelIterator<Item = Result<DocumentChange<'pl>>>,
     ) -> Result<Merger<File, MergeDeladdCboRoaringBitmaps>> {
         let max_memory = indexer.max_memory_by_thread();
 
@@ -208,6 +212,7 @@ impl DocidsExtractor for FacetedDocidsExtractor {
             Ok((
                 index.read_txn()?,
                 fields_ids_map.clone(),
+                db_fields_ids_map.clone(),
                 Vec::new(),
                 CboCachedSorter::new(
                     // TODO use a better value
@@ -229,17 +234,20 @@ impl DocidsExtractor for FacetedDocidsExtractor {
                 tracing::trace_span!(target: "indexing::documents::extract", "docids_extraction");
             let _entered = span.enter();
             document_changes.into_par_iter().try_for_each(|document_change| {
-                context_pool.with(|(rtxn, fields_ids_map, buffer, cached_sorter)| {
-                    Self::extract_document_change(
-                        &*rtxn,
-                        index,
-                        buffer,
-                        fields_ids_map,
-                        &attributes_to_extract,
-                        cached_sorter,
-                        document_change?,
-                    )
-                })
+                context_pool.with(
+                    |(rtxn, fields_ids_map, db_fields_ids_map, buffer, cached_sorter)| {
+                        Self::extract_document_change(
+                            &*rtxn,
+                            index,
+                            buffer,
+                            fields_ids_map,
+                            &db_fields_ids_map,
+                            &attributes_to_extract,
+                            cached_sorter,
+                            document_change?,
+                        )
+                    },
+                )
             })?;
         }
         {
@@ -251,7 +259,7 @@ impl DocidsExtractor for FacetedDocidsExtractor {
             let readers: Vec<_> = context_pool
                 .into_items()
                 .par_bridge()
-                .map(|(_rtxn, _tokenizer, _fields_ids_map, cached_sorter)| {
+                .map(|(_rtxn, _tokenizer, _fields_ids_map, _db_fields_ids_map, cached_sorter)| {
                     let sorter = cached_sorter.into_sorter()?;
                     sorter.into_reader_cursors()
                 })

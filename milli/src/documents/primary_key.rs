@@ -19,6 +19,11 @@ pub trait FieldIdMapper {
     ///
     /// `None` if the field with this name was not found.
     fn id(&self, name: &str) -> Option<FieldId>;
+
+    /// Attempts to map the passed [`FieldId`] to its name.
+    ///
+    /// `None` if the field with this fid was not found.
+    fn name(&self, field_id: FieldId) -> Option<&str>;
 }
 
 /// A type that represent the type of primary key that has been set

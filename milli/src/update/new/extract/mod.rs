@@ -12,14 +12,15 @@ pub use searchable::*;
 
 use super::DocumentChange;
 use crate::update::{GrenadParameters, MergeDeladdCboRoaringBitmaps};
-use crate::{GlobalFieldsIdsMap, Index, Result};
+use crate::{FieldsIdsMap, GlobalFieldsIdsMap, Index, Result};
 
 pub trait DocidsExtractor {
-    fn run_extraction(
+    fn run_extraction<'pl>(
         index: &Index,
         fields_ids_map: &GlobalFieldsIdsMap,
+        db_fields_ids_map: &FieldsIdsMap,
         indexer: GrenadParameters,
-        document_changes: impl IntoParallelIterator<Item = Result<DocumentChange>>,
+        document_changes: impl IntoParallelIterator<Item = Result<DocumentChange<'pl>>>,
     ) -> Result<Merger<File, MergeDeladdCboRoaringBitmaps>>;
 }
 

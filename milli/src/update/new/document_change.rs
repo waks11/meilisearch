@@ -1,32 +1,46 @@
 use heed::RoTxn;
-use obkv::KvReader;
 
-use crate::update::new::KvReaderFieldId;
-use crate::{DocumentId, FieldId, Index, Result};
+use super::document::{DocumentFromDb, DocumentFromPayload, DocumentFromPayloadOrDb};
+use super::TopLevelMap;
+use crate::documents::FieldIdMapper;
+use crate::update::IndexDocumentsMethod;
+use crate::{DocumentId, Index, Result};
 
-pub enum DocumentChange {
+pub enum DocumentChange<'pl> {
     Deletion(Deletion),
-    Update(Update),
-    Insertion(Insertion),
+    Update(Update<'pl>),
+    Insertion(Insertion<'pl>),
 }
-
 pub struct Deletion {
     docid: DocumentId,
-    current: Box<KvReaderFieldId>,
+}
+pub enum Versions<'pl> {
+    Single(TopLevelMap<'pl>),
+    Multiple(Vec<TopLevelMap<'pl>>),
 }
 
-pub struct Update {
+impl<'pl> Versions<'pl> {
+    pub fn into_replace(self) -> Self {
+        match self {
+            Versions::Single(v) => Versions::Single(v),
+            // unwrap: cannot be empty
+            Versions::Multiple(mut v) => Versions::Single(v.pop().unwrap()),
+        }
+    }
+}
+
+pub struct Update<'pl> {
     docid: DocumentId,
-    current: Box<KvReaderFieldId>,
-    new: Box<KvReaderFieldId>,
+    versions: Versions<'pl>,
+    has_deletion: bool,
 }
 
-pub struct Insertion {
+pub struct Insertion<'pl> {
     docid: DocumentId,
-    new: Box<KvReaderFieldId>,
+    versions: Versions<'pl>,
 }
 
-impl DocumentChange {
+impl<'pl> DocumentChange<'pl> {
     pub fn docid(&self) -> DocumentId {
         match &self {
             Self::Deletion(inner) => inner.docid(),
@@ -37,60 +51,89 @@ impl DocumentChange {
 }
 
 impl Deletion {
-    pub fn create(docid: DocumentId, current: Box<KvReaderFieldId>) -> Self {
-        Self { docid, current }
+    pub fn create(docid: DocumentId) -> Self {
+        Self { docid }
     }
 
     pub fn docid(&self) -> DocumentId {
         self.docid
     }
-
-    // TODO shouldn't we use the one in self?
-    pub fn current<'a>(
+    pub fn current<'a, Mapper: FieldIdMapper>(
         &self,
         rtxn: &'a RoTxn,
         index: &'a Index,
-    ) -> Result<Option<&'a KvReader<FieldId>>> {
-        index.documents.get(rtxn, &self.docid).map_err(crate::Error::from)
+        db_fields_ids_map: &'a Mapper,
+    ) -> Result<Option<DocumentFromDb<'a, Mapper>>> {
+        DocumentFromDb::new(self.docid, rtxn, index, &db_fields_ids_map)
     }
 }
 
-impl Insertion {
-    pub fn create(docid: DocumentId, new: Box<KvReaderFieldId>) -> Self {
-        Insertion { docid, new }
-    }
-
-    pub fn docid(&self) -> DocumentId {
-        self.docid
-    }
-
-    pub fn new(&self) -> &KvReader<FieldId> {
-        self.new.as_ref()
-    }
-}
-
-impl Update {
+impl<'pl> Insertion<'pl> {
     pub fn create(
         docid: DocumentId,
-        current: Box<KvReaderFieldId>,
-        new: Box<KvReaderFieldId>,
+        method: IndexDocumentsMethod,
+        versions: Versions<'pl>,
     ) -> Self {
-        Update { docid, current, new }
+        let versions = match method {
+            IndexDocumentsMethod::ReplaceDocuments => versions.into_replace(),
+            IndexDocumentsMethod::UpdateDocuments => versions,
+        };
+        Insertion { docid, versions }
     }
 
     pub fn docid(&self) -> DocumentId {
         self.docid
     }
 
-    pub fn current<'a>(
+    pub fn new(&self) -> DocumentFromPayload<'_> {
+        DocumentFromPayload::new(&self.versions)
+    }
+}
+
+impl<'pl> Update<'pl> {
+    pub fn create(
+        docid: DocumentId,
+        method: IndexDocumentsMethod,
+        versions: Versions<'pl>,
+        has_deletion: bool,
+    ) -> Self {
+        match method {
+            IndexDocumentsMethod::ReplaceDocuments => {
+                Update { docid, versions: versions.into_replace(), has_deletion: true }
+            }
+            IndexDocumentsMethod::UpdateDocuments => Update { docid, versions, has_deletion },
+        }
+    }
+
+    pub fn docid(&self) -> DocumentId {
+        self.docid
+    }
+
+    pub fn current<'a, Mapper: FieldIdMapper>(
         &self,
         rtxn: &'a RoTxn,
         index: &'a Index,
-    ) -> Result<Option<&'a KvReader<FieldId>>> {
-        index.documents.get(rtxn, &self.docid).map_err(crate::Error::from)
+        db_fields_ids_map: &'a Mapper,
+    ) -> Result<Option<DocumentFromDb<'a, Mapper>>> {
+        DocumentFromDb::new(self.docid, rtxn, index, &db_fields_ids_map)
     }
 
-    pub fn new(&self) -> &KvReader<FieldId> {
-        self.new.as_ref()
+    pub fn new<'t, Mapper: FieldIdMapper>(
+        &self,
+        rtxn: &'t RoTxn,
+        index: &'t Index,
+        db_fields_ids_map: &'t Mapper,
+    ) -> Result<DocumentFromPayloadOrDb<'_, 't, Mapper>> {
+        if self.has_deletion {
+            Ok(DocumentFromPayloadOrDb::without_db(&self.versions))
+        } else {
+            DocumentFromPayloadOrDb::with_db(
+                self.docid,
+                rtxn,
+                index,
+                db_fields_ids_map,
+                &self.versions,
+            )
+        }
     }
 }

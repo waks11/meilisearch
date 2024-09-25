@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::RwLock;
 
+use crate::documents::FieldIdMapper;
 use crate::{FieldId, FieldsIdsMap};
 
 /// A fields ids map that can be globally updated to add fields
@@ -11,7 +12,7 @@ pub struct GlobalFieldsIdsMap<'indexing> {
 }
 
 #[derive(Debug, Clone)]
-struct LocalFieldsIdsMap {
+pub struct LocalFieldsIdsMap {
     names_ids: BTreeMap<String, FieldId>,
     ids_names: BTreeMap<FieldId, String>,
 }
@@ -27,18 +28,32 @@ impl LocalFieldsIdsMap {
         self.ids_names.insert(field_id, name.to_owned());
     }
 
-    fn name(&self, id: FieldId) -> Option<&str> {
+    pub fn name(&self, id: FieldId) -> Option<&str> {
         self.ids_names.get(&id).map(String::as_str)
     }
 
-    fn id(&self, name: &str) -> Option<FieldId> {
+    pub fn id(&self, name: &str) -> Option<FieldId> {
         self.names_ids.get(name).copied()
+    }
+}
+
+impl FieldIdMapper for LocalFieldsIdsMap {
+    fn id(&self, name: &str) -> Option<FieldId> {
+        self.id(name)
+    }
+
+    fn name(&self, id: FieldId) -> Option<&str> {
+        self.name(id)
     }
 }
 
 impl<'indexing> GlobalFieldsIdsMap<'indexing> {
     pub fn new(global: &'indexing RwLock<FieldsIdsMap>) -> Self {
         Self { local: LocalFieldsIdsMap::new(global), global }
+    }
+
+    pub fn local(&self) -> &LocalFieldsIdsMap {
+        &self.local
     }
 
     /// Returns the field id related to a field name, it will create a new field id if the

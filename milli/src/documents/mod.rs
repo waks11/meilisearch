@@ -96,6 +96,10 @@ impl FieldIdMapper for DocumentsBatchIndex {
     fn id(&self, name: &str) -> Option<FieldId> {
         self.id(name)
     }
+
+    fn name(&self, field_id: FieldId) -> Option<&str> {
+        self.name(field_id)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

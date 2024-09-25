@@ -22,21 +22,16 @@ impl DocumentDeletion {
 }
 
 impl<'p> DocumentChanges<'p> for DocumentDeletion {
-    type Parameter = &'p Index;
+    type Parameter = ();
 
-    fn document_changes(
+    fn document_changes<'a>(
         self,
-        _fields_ids_map: &mut FieldsIdsMap,
-        param: Self::Parameter,
-    ) -> Result<impl IndexedParallelIterator<Item = Result<DocumentChange>> + Clone + 'p> {
-        let index = param;
-        let items = Arc::new(ItemsPool::new(|| index.read_txn().map_err(crate::Error::from)));
+        _fields_ids_map: &'a mut FieldsIdsMap,
+        _param: Self::Parameter,
+    ) -> Result<impl IndexedParallelIterator<Item = Result<DocumentChange<'p>>> + Clone + 'p> {
         let to_delete: Vec<_> = self.to_delete.into_iter().collect();
-        Ok(to_delete.into_par_iter().map_with(items, |items, docid| {
-            items.with(|rtxn| {
-                let current = index.document(rtxn, docid)?;
-                Ok(DocumentChange::Deletion(Deletion::create(docid, current.boxed())))
-            })
-        }))
+        Ok(to_delete
+            .into_par_iter()
+            .map(|docid| Ok(DocumentChange::Deletion(Deletion::create(docid)))))
     }
 }

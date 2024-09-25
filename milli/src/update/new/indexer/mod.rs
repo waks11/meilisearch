@@ -29,11 +29,11 @@ mod update_by_function;
 pub trait DocumentChanges<'p> {
     type Parameter: 'p;
 
-    fn document_changes(
+    fn document_changes<'a>(
         self,
-        fields_ids_map: &mut FieldsIdsMap,
+        fields_ids_map: &'a mut FieldsIdsMap,
         param: Self::Parameter,
-    ) -> Result<impl IndexedParallelIterator<Item = Result<DocumentChange>> + Clone + 'p>;
+    ) -> Result<impl IndexedParallelIterator<Item = Result<DocumentChange<'p>>> + Clone + 'p>;
 }
 
 /// This is the main function of this crate.
@@ -41,7 +41,7 @@ pub trait DocumentChanges<'p> {
 /// Give it the output of the [`Indexer::document_changes`] method and it will execute it in the [`rayon::ThreadPool`].
 ///
 /// TODO return stats
-pub fn index<PI>(
+pub fn index<'pl, PI>(
     wtxn: &mut RwTxn,
     index: &Index,
     fields_ids_map: FieldsIdsMap,
@@ -49,12 +49,13 @@ pub fn index<PI>(
     document_changes: PI,
 ) -> Result<()>
 where
-    PI: IndexedParallelIterator<Item = Result<DocumentChange>> + Send + Clone,
+    PI: IndexedParallelIterator<Item = Result<DocumentChange<'pl>>> + Send + Clone,
 {
     let (merger_sender, writer_receiver) = merger_writer_channel(10_000);
     // This channel acts as a rendezvous point to ensure that we are one task ahead
     let (extractor_sender, merger_receiver) = extractors_merger_channels(4);
 
+    let db_fields_ids_map = fields_ids_map.clone();
     let fields_ids_map_lock = RwLock::new(fields_ids_map);
     let global_fields_ids_map = GlobalFieldsIdsMap::new(&fields_ids_map_lock);
     let global_fields_ids_map_clone = global_fields_ids_map.clone();
@@ -71,23 +72,7 @@ where
                     // document but we need to create a function that collects and compresses documents.
                     let document_sender = extractor_sender.document_sender();
                     document_changes.clone().into_par_iter().try_for_each(|result| {
-                        match result? {
-                            DocumentChange::Deletion(deletion) => {
-                                let docid = deletion.docid();
-                                document_sender.delete(docid).unwrap();
-                            }
-                            DocumentChange::Update(update) => {
-                                let docid = update.docid();
-                                let content = update.new();
-                                document_sender.insert(docid, content.boxed()).unwrap();
-                            }
-                            DocumentChange::Insertion(insertion) => {
-                                let docid = insertion.docid();
-                                let content = insertion.new();
-                                document_sender.insert(docid, content.boxed()).unwrap();
-                                // extracted_dictionary_sender.send(self, dictionary: &[u8]);
-                            }
-                        }
+                        document_sender.change(result?).unwrap();
                         Ok(()) as Result<_>
                     })?;
 
@@ -109,6 +94,7 @@ where
                         >(
                             index,
                             &global_fields_ids_map,
+                            &db_fields_ids_map,
                             grenad_parameters,
                             document_changes.clone(),
                             &extractor_sender,
@@ -142,6 +128,7 @@ where
                         >(
                             index,
                             &global_fields_ids_map,
+                            &db_fields_ids_map,
                             grenad_parameters,
                             document_changes.clone(),
                             &extractor_sender,
@@ -221,14 +208,16 @@ where
 /// TODO: GrenadParameters::default() should be removed in favor a passed parameter
 /// TODO: manage the errors correctly
 /// TODO: we must have a single trait that also gives the extractor type
-fn extract_and_send_docids<E: DocidsExtractor, D: MergerOperationType>(
+fn extract_and_send_docids<'pl, E: DocidsExtractor, D: MergerOperationType>(
     index: &Index,
     fields_ids_map: &GlobalFieldsIdsMap,
+    db_fields_ids_map: &FieldsIdsMap,
     indexer: GrenadParameters,
-    document_changes: impl IntoParallelIterator<Item = Result<DocumentChange>>,
+    document_changes: impl IntoParallelIterator<Item = Result<DocumentChange<'pl>>>,
     sender: &ExtractorSender,
 ) -> Result<()> {
-    let merger = E::run_extraction(index, fields_ids_map, indexer, document_changes)?;
+    let merger =
+        E::run_extraction(index, fields_ids_map, db_fields_ids_map, indexer, document_changes)?;
     Ok(sender.send_searchable::<D>(merger).unwrap())
 }
 

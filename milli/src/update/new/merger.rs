@@ -5,11 +5,13 @@ use bincode::ErrorKind;
 use grenad::Merger;
 use heed::types::Bytes;
 use heed::{Database, RoTxn};
+use memmap2::Mmap;
 use roaring::RoaringBitmap;
 
 use super::channel::*;
+use super::document::Document;
 use super::extract::FacetKind;
-use super::{Deletion, DocumentChange, Insertion, KvReaderDelAdd, KvReaderFieldId, Update};
+use super::{DocumentChange, KvReaderDelAdd};
 use crate::update::del_add::DelAdd;
 use crate::update::new::channel::MergerOperation;
 use crate::update::new::word_fst_builder::WordFstBuilder;
@@ -28,6 +30,8 @@ pub fn merge_grenad_entries(
     let mut buffer: Vec<u8> = Vec::new();
     let mut documents_ids = index.documents_ids(rtxn)?;
     let mut geo_extractor = GeoExtractor::new(rtxn, index)?;
+    let mut document_buffer = Vec::new();
+    //let mut unordered_field_buffer = Vec::new();
 
     for merger_operation in receiver {
         match merger_operation {
@@ -121,38 +125,44 @@ pub fn merge_grenad_entries(
                     |_, _key| Ok(()),
                 )?;
             }
-            MergerOperation::InsertDocument { docid, document } => {
-                let span =
-                    tracing::trace_span!(target: "indexing::documents::merge", "insert_document");
-                let _entered = span.enter();
-                documents_ids.insert(docid);
-                sender.documents().uncompressed(docid, &document).unwrap();
-
-                if let Some(geo_extractor) = geo_extractor.as_mut() {
-                    let current = index.documents.remap_data_type::<Bytes>().get(rtxn, &docid)?;
-                    let current: Option<&KvReaderFieldId> = current.map(Into::into);
-                    let change = match current {
-                        Some(current) => {
-                            DocumentChange::Update(Update::create(docid, current.boxed(), document))
+            MergerOperation::Change(document_change) => {
+                match &document_change {
+                    DocumentChange::Deletion(deletion) => {
+                        let span = tracing::trace_span!(target: "indexing::documents::merge", "delete_document");
+                        let _entered = span.enter();
+                        if !documents_ids.remove(deletion.docid()) {
+                            unreachable!("Tried deleting a document that we do not know about");
                         }
-                        None => DocumentChange::Insertion(Insertion::create(docid, document)),
-                    };
-                    geo_extractor.manage_change(&mut global_fields_ids_map, &change)?;
-                }
-            }
-            MergerOperation::DeleteDocument { docid } => {
-                let span =
-                    tracing::trace_span!(target: "indexing::documents::merge", "delete_document");
-                let _entered = span.enter();
-                if !documents_ids.remove(docid) {
-                    unreachable!("Tried deleting a document that we do not know about");
-                }
-                sender.documents().delete(docid).unwrap();
+                        sender.documents().delete(deletion.docid()).unwrap();
+                    }
+                    DocumentChange::Update(document_change) => {
+                        let span = tracing::trace_span!(target: "indexing::documents::merge", "update_document");
+                        let _entered = span.enter();
+                        let docid = document_change.docid();
 
+                        let new_document =
+                            document_change.new(rtxn, index, global_fields_ids_map.local())?;
+                        let obkv = new_document
+                            .write_to_obkv(global_fields_ids_map.local(), &mut document_buffer);
+
+                        sender.documents().uncompressed(docid, obkv).unwrap();
+                    }
+                    DocumentChange::Insertion(document_change) => {
+                        let span = tracing::trace_span!(target: "indexing::documents::merge", "insert_document");
+                        let _entered = span.enter();
+                        let docid = document_change.docid();
+                        documents_ids.insert(docid);
+
+                        let new_document = document_change.new();
+
+                        let obkv = new_document
+                            .write_to_obkv(global_fields_ids_map.local(), &mut document_buffer);
+
+                        sender.documents().uncompressed(docid, obkv).unwrap();
+                    }
+                }
                 if let Some(geo_extractor) = geo_extractor.as_mut() {
-                    let current = index.document(rtxn, docid)?;
-                    let change = DocumentChange::Deletion(Deletion::create(docid, current.boxed()));
-                    geo_extractor.manage_change(&mut global_fields_ids_map, &change)?;
+                    geo_extractor.manage_change(&mut global_fields_ids_map, &document_change)?;
                 }
             }
             MergerOperation::FinishedDocument => {

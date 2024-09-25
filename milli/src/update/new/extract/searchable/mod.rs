@@ -15,14 +15,15 @@ use super::cache::CboCachedSorter;
 use super::DocidsExtractor;
 use crate::update::new::{DocumentChange, ItemsPool};
 use crate::update::{create_sorter, GrenadParameters, MergeDeladdCboRoaringBitmaps};
-use crate::{GlobalFieldsIdsMap, Index, Result, MAX_POSITION_PER_ATTRIBUTE};
+use crate::{FieldsIdsMap, GlobalFieldsIdsMap, Index, Result, MAX_POSITION_PER_ATTRIBUTE};
 
 pub trait SearchableExtractor {
-    fn run_extraction(
+    fn run_extraction<'pl>(
         index: &Index,
         fields_ids_map: &GlobalFieldsIdsMap,
+        db_fields_ids_map: &FieldsIdsMap,
         indexer: GrenadParameters,
-        document_changes: impl IntoParallelIterator<Item = Result<DocumentChange>>,
+        document_changes: impl IntoParallelIterator<Item = Result<DocumentChange<'pl>>>,
     ) -> Result<Merger<File, MergeDeladdCboRoaringBitmaps>> {
         let max_memory = indexer.max_memory_by_thread();
 
@@ -85,6 +86,7 @@ pub trait SearchableExtractor {
                         index,
                         document_tokenizer,
                         fields_ids_map,
+                        db_fields_ids_map,
                         cached_sorter,
                         document_change?,
                     )
@@ -117,6 +119,7 @@ pub trait SearchableExtractor {
         index: &Index,
         document_tokenizer: &DocumentTokenizer,
         fields_ids_map: &mut GlobalFieldsIdsMap,
+        db_fields_ids_map: &FieldsIdsMap,
         cached_sorter: &mut CboCachedSorter<MergeDeladdCboRoaringBitmaps>,
         document_change: DocumentChange,
     ) -> Result<()>;
@@ -128,12 +131,13 @@ pub trait SearchableExtractor {
 }
 
 impl<T: SearchableExtractor> DocidsExtractor for T {
-    fn run_extraction(
+    fn run_extraction<'pl>(
         index: &Index,
         fields_ids_map: &GlobalFieldsIdsMap,
+        db_fields_ids_map: &FieldsIdsMap,
         indexer: GrenadParameters,
-        document_changes: impl IntoParallelIterator<Item = Result<DocumentChange>>,
+        document_changes: impl IntoParallelIterator<Item = Result<DocumentChange<'pl>>>,
     ) -> Result<Merger<File, MergeDeladdCboRoaringBitmaps>> {
-        Self::run_extraction(index, fields_ids_map, indexer, document_changes)
+        Self::run_extraction(index, fields_ids_map, db_fields_ids_map, indexer, document_changes)
     }
 }

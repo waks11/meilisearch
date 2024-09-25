@@ -2,15 +2,15 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use heed::RoTxn;
-use obkv::KvReader;
 
 use super::tokenize_document::DocumentTokenizer;
 use super::SearchableExtractor;
 use crate::proximity::{index_proximity, MAX_DISTANCE};
+use crate::update::new::document::Document;
 use crate::update::new::extract::cache::CboCachedSorter;
 use crate::update::new::DocumentChange;
 use crate::update::MergeDeladdCboRoaringBitmaps;
-use crate::{FieldId, GlobalFieldsIdsMap, Index, Result};
+use crate::{FieldId, FieldsIdsMap, GlobalFieldsIdsMap, Index, Result};
 
 pub struct WordPairProximityDocidsExtractor;
 impl SearchableExtractor for WordPairProximityDocidsExtractor {
@@ -32,6 +32,7 @@ impl SearchableExtractor for WordPairProximityDocidsExtractor {
         index: &Index,
         document_tokenizer: &DocumentTokenizer,
         fields_ids_map: &mut GlobalFieldsIdsMap,
+        db_fields_ids_map: &FieldsIdsMap,
         cached_sorter: &mut CboCachedSorter<MergeDeladdCboRoaringBitmaps>,
         document_change: DocumentChange,
     ) -> Result<()> {
@@ -44,9 +45,9 @@ impl SearchableExtractor for WordPairProximityDocidsExtractor {
         let docid = document_change.docid();
         match document_change {
             DocumentChange::Deletion(inner) => {
-                let document = inner.current(rtxn, index)?.unwrap();
+                let document = inner.current(rtxn, index, db_fields_ids_map)?.unwrap();
                 process_document_tokens(
-                    document,
+                    &document,
                     document_tokenizer,
                     fields_ids_map,
                     &mut word_positions,
@@ -56,9 +57,9 @@ impl SearchableExtractor for WordPairProximityDocidsExtractor {
                 )?;
             }
             DocumentChange::Update(inner) => {
-                let document = inner.current(rtxn, index)?.unwrap();
+                let document = inner.current(rtxn, index, db_fields_ids_map)?.unwrap();
                 process_document_tokens(
-                    document,
+                    &document,
                     document_tokenizer,
                     fields_ids_map,
                     &mut word_positions,
@@ -66,9 +67,9 @@ impl SearchableExtractor for WordPairProximityDocidsExtractor {
                         del_word_pair_proximity.push(((w1, w2), prox));
                     },
                 )?;
-                let document = inner.new();
+                let document = inner.new(rtxn, index, db_fields_ids_map)?;
                 process_document_tokens(
-                    document,
+                    &document,
                     document_tokenizer,
                     fields_ids_map,
                     &mut word_positions,
@@ -80,7 +81,7 @@ impl SearchableExtractor for WordPairProximityDocidsExtractor {
             DocumentChange::Insertion(inner) => {
                 let document = inner.new();
                 process_document_tokens(
-                    document,
+                    &document,
                     document_tokenizer,
                     fields_ids_map,
                     &mut word_positions,
@@ -131,8 +132,8 @@ fn word_positions_into_word_pair_proximity(
     Ok(())
 }
 
-fn process_document_tokens(
-    document: &KvReader<FieldId>,
+fn process_document_tokens<'d>(
+    document: &'d impl Document<'d>,
     document_tokenizer: &DocumentTokenizer,
     fields_ids_map: &mut GlobalFieldsIdsMap,
     word_positions: &mut VecDeque<(Rc<str>, u16)>,
