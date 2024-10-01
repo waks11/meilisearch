@@ -1,5 +1,5 @@
 use std::fs::{read_dir, read_to_string, remove_file, File};
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
 use anyhow::{bail, Context};
@@ -64,6 +64,13 @@ enum Command {
         skip_enqueued_tasks: bool,
     },
 
+    /// Exports the documents of an index from the Meilisearch database to stdout.
+    ExportDocuments {
+        /// The index name to export the documents from.
+        #[arg(long)]
+        index_name: String,
+    },
+
     /// Attempts to upgrade from one major version to the next without a dump.
     ///
     /// Make sure to run this commmand when Meilisearch is not running!
@@ -89,6 +96,7 @@ fn main() -> anyhow::Result<()> {
         Command::ExportADump { dump_dir, skip_enqueued_tasks } => {
             export_a_dump(db_path, dump_dir, skip_enqueued_tasks)
         }
+        Command::ExportDocuments { index_name } => export_documents(db_path, index_name),
         Command::OfflineUpgrade { target_version } => {
             let target_version = parse_version(&target_version).context("While parsing `--target-version`. Make sure `--target-version` is in the format MAJOR.MINOR.PATCH")?;
             OfflineUpgrade { db_path, current_version: detected_version, target_version }.upgrade()
@@ -605,7 +613,7 @@ fn export_a_dump(
     db_path: PathBuf,
     dump_dir: PathBuf,
     skip_enqueued_tasks: bool,
-) -> Result<(), anyhow::Error> {
+) -> anyhow::Result<()> {
     let started_at = OffsetDateTime::now_utc();
 
     // 1. Extracts the instance UID from disk
@@ -747,6 +755,43 @@ fn export_a_dump(
     dump.persist_to(BufWriter::new(file))?;
 
     eprintln!("Dump exported at path {:?}", path.display());
+
+    Ok(())
+}
+
+fn export_documents(db_path: PathBuf, index_name: String) -> anyhow::Result<()> {
+    let index_scheduler_path = db_path.join("tasks");
+    let env = unsafe { EnvOpenOptions::new().max_dbs(100).open(&index_scheduler_path) }
+        .with_context(|| format!("While trying to open {:?}", index_scheduler_path.display()))?;
+
+    let rtxn = env.read_txn()?;
+    let index_mapping: Database<Str, UuidCodec> =
+        try_opening_database(&env, &rtxn, "index-mapping")?;
+
+    for result in index_mapping.iter(&rtxn)? {
+        let (uid, uuid) = result?;
+        if uid == index_name {
+            let index_path = db_path.join("indexes").join(uuid.to_string());
+            let index = Index::new(EnvOpenOptions::new(), &index_path).with_context(|| {
+                format!("While trying to open the index at path {:?}", index_path.display())
+            })?;
+
+            let rtxn = index.read_txn()?;
+            let fields_ids_map = index.fields_ids_map(&rtxn)?;
+            let all_fields: Vec<_> = fields_ids_map.iter().map(|(id, _)| id).collect();
+
+            let mut stdout = BufWriter::new(std::io::stdout());
+            for ret in index.all_documents(&rtxn)? {
+                let (_id, doc) = ret?;
+                let document = obkv_to_json(&all_fields, &fields_ids_map, doc)?;
+                serde_json::to_writer(&mut stdout, &document)?;
+            }
+
+            stdout.flush()?;
+        } else {
+            eprintln!("Found index {uid} but it's not the right index...");
+        }
+    }
 
     Ok(())
 }
