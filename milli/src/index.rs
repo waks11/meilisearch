@@ -223,7 +223,7 @@ impl Index {
         let documents = env.create_database(&mut wtxn, Some(DOCUMENTS))?;
         wtxn.commit()?;
 
-        Index::set_creation_dates(&env, main, created_at, updated_at)?;
+        // Index::set_creation_dates(&env, main, created_at, updated_at)?;
 
         Ok(Index {
             env,
